@@ -25,13 +25,12 @@ namespace ELementary.Mapper.Test
                 Integer = 1
             };
 
-            var dst = new Destination();
-
             var mapper = new MapperBuilder().MapStrict<Source, Destination>().Build();
 
             // ACT
 
-            var result = mapper(src, dst);
+            var result = new Destination();
+            mapper(src, result);
 
             // ASSERT
 
