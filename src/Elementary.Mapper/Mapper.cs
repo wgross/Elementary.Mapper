@@ -1,45 +1,79 @@
-﻿using System;
+﻿using Elementary.Mapper.Validators;
+using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 
 namespace Elementary.Mapper
 {
-    public interface IMapper<S, D>
+    public interface IMapper
     {
-        D Map(S s, D d);
+        D Map<S, D>(S source, D destination);
     }
 
     public class MapperBuilder
     {
-        private class Mapper<S, D> : IMapper<S, D>
+        public class Mapper<S, D>
         {
-            public D Map(S s, D d)
+            private readonly Func<S, D, D> mapperFunc;
+
+            internal Mapper(Delegate mapperLambda)
             {
-                return d;
+                this.mapperFunc = (Func<S, D, D>)mapperLambda;
             }
+
+            public D Map(S source, D destination) => this.mapperFunc.Invoke(source, destination);
         }
 
         public class Config<S, D>
         {
-            public Action<S, D> Build() => (Action<S, D>)CreateMapperLambda().Compile();
+            public IMapperPropertySelector PropertySelector { get; }
 
-            private static LambdaExpression CreateMapperLambda()
+            public IEnumerable<IMapperValidator> Validators => this.validators;
+
+            private List<IMapperValidator> validators = new List<IMapperValidator>();
+
+            public Config(IMapperPropertySelector propertySelector)
+            {
+                this.PropertySelector = propertySelector;
+                this.validators.Add(new RejectDifferentPropertyTypes());
+                this.validators.Add(new RejectIncompleteDestination());
+            }
+
+            public Mapper<S, D> Build() => new Mapper<S, D>(CreateMapperLambda().Compile());
+
+            private LambdaExpression CreateMapperLambda()
             {
                 var instances = (
                     src: Expression.Parameter(typeof(S), "source"),
                     dst: Expression.Parameter(typeof(D), "destination")
                 );
 
-                var propertyPairs = typeof(S)
-                    .GetProperties()
-                    .Select(p => (src: p, dst: typeof(D).GetProperty(p.Name)));
+                var propertyPairs = ValidatedPropertyPairs();
 
-                var body = Expression.Block(propertyPairs
-                    .Select(properties => PropertyMapperExpression(instances.src, properties.src, instances.dst, properties.dst))
-                    .ToArray());
+                IEnumerable<Expression> makeBodyExpressions()
+                {
+                    foreach (var expr in propertyPairs.Select(properties => PropertyMapperExpression(instances.src, properties.src, instances.dst, properties.dst)))
+                        yield return expr;
+                    yield return Expression.Convert(instances.dst, typeof(D));
+                }
+
+                var body = Expression.Block(makeBodyExpressions().ToArray());
 
                 return Expression.Lambda(body, instances.src, instances.dst);
+            }
+
+            private IEnumerable<(PropertyInfo src, PropertyInfo dst)> ValidatedPropertyPairs()
+            {
+                var propertyPairs = this.PropertySelector.SelectProperties<S, D>();
+                var violations = this.validators
+                    .SelectMany(v => v.Validate<S, D>(propertyPairs));
+                if (violations.Any())
+                    throw new InvalidMapperConfigException(violations);
+
+                return propertyPairs;
             }
 
             private static MethodCallExpression PropertyMapperExpression(ParameterExpression sourceParameter, PropertyInfo sourceProperty, ParameterExpression destinationParameter, PropertyInfo destinationProperty)
@@ -78,9 +112,11 @@ namespace Elementary.Mapper
             }
         }
 
-        public Config<S, D> MapStrict<S, D>()
+        public Config<S, D> Map<S, D>()
         {
-            return new Config<S, D>();
+            if (typeof(S).GetCustomAttributes(typeof(DynamicAttribute), true).Any())
+                throw new InvalidOperationException("source type must not be dynamic");
+            return new Config<S, D>(new SelectValueTypeAndStringPropertiesOfIdenticalName());
         }
     }
 }
